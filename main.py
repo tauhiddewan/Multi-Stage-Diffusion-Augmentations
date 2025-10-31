@@ -12,7 +12,7 @@ from utils.loss import select_criterion
 from utils.train import training_loop, test_loop, get_lr_scheduler
 from utils.plots import save_training_curves
 from utils.misc import create_logger
-
+from utils.viz import save_stagewise_examples
 
 
 def main():
@@ -79,7 +79,7 @@ def main():
 
     test_ds = DiffusedKvasirDataset(
         data=test_data,
-        mode="val",
+        mode="test",
         image_size=image_size,
         mask_size=mask_size,
         diff_aug=None,
@@ -87,6 +87,23 @@ def main():
 
     train_loader = DataLoader(train_ds, batch_size=4, shuffle=True, num_workers=0, pin_memory=True)
     test_loader = DataLoader(test_ds, batch_size=4, shuffle=False, num_workers=0, pin_memory=True)
+
+
+    turbo_strengths = [0.28, 0.32, 0.36, 0.40]
+    saved_paths = save_stagewise_examples(
+        diff_aug=diff_aug,
+        samples=[train_data[i] for i in range(min(4, len(train_data)))],
+        image_size=(384, 384),
+        strengths=turbo_strengths,
+        steps=None,        
+        guidance=None,       
+        target_size=None,   
+        out_dir=output_path,
+        prefix="stagewise",
+        max_examples=4,
+    )
+
+    logger.info(f"Saved stage-wise diffusion grids:\n  " + "\n  ".join(saved_paths))
 
     # ============================================================
     #  Model, loss, optimizer, scheduler

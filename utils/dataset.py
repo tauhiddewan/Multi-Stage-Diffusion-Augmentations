@@ -46,7 +46,7 @@ class DiffusedKvasirDataset(Dataset):
         img = self.base_img(image_pil)     # [3,H,W], [0,1]
         msk = self.base_mask(mask_pil)     # [1,Hm, Wm], [0,1]
 
-        if self.mode in ("train", "oversample") and self.diff_aug is not None:
+        if self.mode in ("train") and self.diff_aug is not None:
             img = self.diff_aug(img)       # keep [0,1]
 
         # normalize + binarize mask
