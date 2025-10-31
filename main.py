@@ -10,6 +10,7 @@ from utils.dif_aug import DiffusionImg2ImgAug, Stage
 from utils.model import select_model, count_params
 from utils.loss import select_criterion
 from utils.train import training_loop, test_loop, get_lr_scheduler
+from utils.plots import save_training_curves
 from utils.misc import create_logger
 
 
@@ -26,8 +27,8 @@ def main():
     data = [(Image.open(i).convert("RGB"), Image.open(m).convert("L"))
             for i, m in zip(img_files, msk_files)]
     train_size = int(0.8 * len(data))
-    val_size = len(data) - train_size
-    train_data, val_data = random_split(data, [train_size, val_size])
+    test_size = len(data) - train_size
+    train_data, test_data = random_split(data, [train_size, test_size])
 
     image_size = (384, 384)
     mask_size = (96, 96)
@@ -76,8 +77,8 @@ def main():
         diff_aug=diff_aug,
     )
 
-    val_ds = DiffusedKvasirDataset(
-        data=val_data,
+    test_ds = DiffusedKvasirDataset(
+        data=test_data,
         mode="val",
         image_size=image_size,
         mask_size=mask_size,
@@ -85,7 +86,7 @@ def main():
     )
 
     train_loader = DataLoader(train_ds, batch_size=4, shuffle=True, num_workers=0, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=4, shuffle=False, num_workers=0, pin_memory=True)
+    test_loader = DataLoader(test_ds, batch_size=4, shuffle=False, num_workers=0, pin_memory=True)
 
     # ============================================================
     #  Model, loss, optimizer, scheduler
@@ -124,6 +125,15 @@ def main():
         use_scheduler=True,
         save_model=True,
     )
+    paths = save_training_curves(
+        losses=losses,
+        ma_losses=ma_losses,
+        dice_scores=dice_scores,
+        miou_scores=miou_scores,
+        out_dir=output_path,
+        prefix="train"
+    )
+    logger.info(f"Saved training curves: {paths}")
 
     # ============================================================
     #  Validation
@@ -132,12 +142,12 @@ def main():
     val_loss, val_dice, val_miou = test_loop(
         model=best_model,
         model_name=model_name,
-        test_dataloader=val_loader,
+        test_dataloader=test_loader,
         criterion=criterion,
         device=device,
         num_repeat=1,
     )
-    logger.info(f"Validation - Loss: {val_loss:.4f}, Dice: {val_dice:.4f}, mIoU: {val_miou:.4f}")
+    logger.info(f"Test - Loss: {val_loss:.4f}, Dice: {val_dice:.4f}, mIoU: {val_miou:.4f}")
 
 
 if __name__ == "__main__":
