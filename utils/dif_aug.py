@@ -7,14 +7,14 @@ import torch
 from PIL import Image
 from diffusers import StableDiffusionImg2ImgPipeline
 
-def _tensor_to_pil(img_t: torch.Tensor) -> Image.Image:
+def _tensor_to_pil(img_t):
     # img_t: [C,H,W] in [0,1]
     x = img_t.detach().clamp(0,1).mul(255).byte().permute(1,2,0).cpu().numpy()
     if x.ndim == 2:
         x = np.repeat(x[...,None], 3, axis=2)
     return Image.fromarray(x)
 
-def _pil_to_tensor(img_pil: Image.Image) -> torch.Tensor:
+def _pil_to_tensor(img_pil):
     arr = np.array(img_pil)
     if arr.ndim == 2:
         arr = np.repeat(arr[...,None], 3, axis=2)
@@ -68,10 +68,10 @@ class DiffusionImg2ImgAug:
             self.pipe.enable_attention_slicing()
             self.pipe.enable_vae_tiling()
 
-    def set_epoch(self, epoch: int):
+    def set_epoch(self, epoch):
         self._epoch = int(epoch)
 
-    def _current_strength(self) -> float:
+    def _current_strength(self):
         s = self.stages[0].strength
         for st in self.stages:
             if self._epoch >= st.start_epoch:
@@ -80,7 +80,7 @@ class DiffusionImg2ImgAug:
                 break
         return float(np.clip(s, 0.0, 1.0))
 
-    def __call__(self, img_t: torch.Tensor) -> torch.Tensor:
+    def __call__(self, img_t):
         if self.rng.random() > self.p:
             return img_t
 
