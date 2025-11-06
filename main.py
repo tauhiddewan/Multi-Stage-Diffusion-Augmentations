@@ -96,7 +96,7 @@ def main():
     criterion = select_criterion(model_name)
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
 
-    num_epochs = 50
+    num_epochs = int(env_vars.get("num_epochs", 100))
     scheduler = get_lr_scheduler(optimizer, num_epochs=num_epochs,
                                  warmup_epochs=5, min_lr=1e-6)
 
