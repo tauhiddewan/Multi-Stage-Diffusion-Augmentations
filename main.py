@@ -46,7 +46,7 @@ def main():
         prob_value=0.4, # augment ~40% of training samples
         model_id="runwayml/stable-diffusion-v1-5",
         controlnet_id="lllyasviel/control_v11p_sd15_seg",
-        prompt="endoscopy image, realistic lighting, different hospital scanner",
+        prompt=str(env_vars.get("prompt", "colonscopic image, realistic lighting, different hospital scanner")),
         neg_prompt=None,
         guidance_scale=3.5,
         condn_scale=1.0,
