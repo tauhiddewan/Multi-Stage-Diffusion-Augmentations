@@ -131,11 +131,7 @@ def main():
     )
     logger.info(f"Saved training curves: {paths}")
 
-    # ============================================================
-    #  Validation
-    # ============================================================
-    logger.info("Running validation...")
-    val_loss, val_dice, val_miou = test_loop(
+    test_loss, test_dice, test_miou = test_loop(
         model=best_model,
         model_name=model_name,
         test_dataloader=test_loader,
@@ -143,7 +139,7 @@ def main():
         device=device,
         num_repeat=1,
     )
-    logger.info(f"Test - Loss: {val_loss:.4f}, Dice: {val_dice:.4f}, mIoU: {val_miou:.4f}")
+    logger.info(f"Test - Loss: {test_loss:.4f}, Dice: {test_dice:.4f}, IoU: {test_miou:.4f}")
 
 
 if __name__ == "__main__":
