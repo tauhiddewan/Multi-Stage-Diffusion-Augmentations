@@ -42,7 +42,7 @@ def main():
     output_path = env_vars.get("output_folder_path", "./outputs")
 
     diff_aug = ControlNetAug(
-        alpha=0.95, # start mostly real; constant for now
+        alpha = float(env_vars.get("alpha", 0.95)), # start mostly real; constant for now
         prob_value=0.4, # augment ~40% of training samples
         model_id="runwayml/stable-diffusion-v1-5",
         controlnet_id="lllyasviel/control_v11p_sd15_seg",
