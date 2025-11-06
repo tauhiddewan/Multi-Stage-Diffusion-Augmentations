@@ -139,7 +139,7 @@ def main():
         device=device,
         num_repeat=1,
     )
-    logger.info(f"Test - Loss: {test_loss:.4f}, Dice: {test_dice:.4f}, IoU: {test_miou:.4f}")
+    logger.info(f"Test - Loss: {test_loss:.4f}, Dice: {test_dice:.4f}, mIoU: {test_miou:.4f}")
 
 
 if __name__ == "__main__":

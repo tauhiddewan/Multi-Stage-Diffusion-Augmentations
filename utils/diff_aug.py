@@ -58,7 +58,7 @@ class ControlNetAug:
         )
 
         self.pipeline = StableDiffusionControlNetPipeline.from_pretrained(
-            model_id=model_id, 
+            pretrained_model_name_or_path=model_id, 
             controlnet=controlnet, 
             torch_dtype=torch_dtype, 
             safety_checker=None, 
