@@ -1,4 +1,6 @@
 import os
+import math
+import pickle
 import torch
 from glob import glob
 from PIL import Image
@@ -6,68 +8,56 @@ from dotenv import dotenv_values
 from torch.utils.data import DataLoader, random_split
 from torch.optim import AdamW
 from utils.dataset import DiffusedKvasirDataset
-from utils.dif_aug import DiffusionImg2ImgAug, Stage
+from utils.diff_aug import ControlNetAug
 from utils.model import select_model, count_params
 from utils.loss import select_criterion
 from utils.train import training_loop, test_loop, get_lr_scheduler
 from utils.plots import save_training_curves
 from utils.misc import create_logger
-from utils.viz import save_stagewise_examples
+
+
+def alpha_linear(epoch, T, a0=0.95, a1=0.40):
+    t = 0 if T is None or T <= 1 else epoch / (T - 1)
+    return a0 * (1 - t) + a1 * t
+
+def alpha_cosine(epoch, T, a0=0.95, a1=0.40):
+    t = 0 if T is None or T <= 1 else epoch / (T - 1)
+    w = 0.5 * (1 - math.cos(math.pi * t))
+    return a0 * (1 - w) + a1 * w
 
 
 def main():
-    # --- Environment and device ---
     env_vars = dotenv_values(dotenv_path="./.env")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger = create_logger(log_filename="curriculam_diff", env_vars=env_vars)
+    logger = create_logger(log_filename="controlnet_alpha_blend", env_vars=env_vars)
     
-    root = env_vars.get("data_folder_path", "./data")
-    img_files = sorted(glob(os.path.join(root, "images", "*.jpg")))
-    msk_files = sorted(glob(os.path.join(root, "masks", "*.jpg")))
-    data = [(Image.open(i).convert("RGB"), Image.open(m).convert("L"))
-            for i, m in zip(img_files, msk_files)]
-    train_size = int(0.8 * len(data))
-    test_size = len(data) - train_size
-    train_data, test_data = random_split(data, [train_size, test_size])
+    with open(f'{env_vars["data_folder_path"]}/{env_vars["split_fname"]}', "rb") as f:
+        data = pickle.load(f)
 
-    image_size = (384, 384)
-    mask_size = (96, 96)
-    output_path = env_vars.get("output_folder_path", "./outputs" )
+    train_data = data["train_data"]
+    test_data = data["test_data"]
 
-    # diff_aug = DiffusionImg2ImgAug(
-    #     model_id="runwayml/stable-diffusion-v1-5",
-    #     stages=(
-    #         Stage(0,  0.03),
-    #         Stage(10, 0.07),
-    #         Stage(25, 0.12),
-    #         Stage(40, 0.18),
-    #     ),
-    #     guidance_scale=2.0,
-    #     num_inference_steps=15,
-    #     p=0.6,
-    #     target_size=512,
-    #     prompt="",       # try "endoscopy image" if you want style bias
-    #     seed=123,
-    #     dtype="fp16",
-    # )
+    image_size = (384, 384)   # model input size
+    mask_size = (96, 96)      # mask for model head (downsampled)
+    output_path = env_vars.get("output_folder_path", "./outputs")
 
-    diff_aug = DiffusionImg2ImgAug(
-        model_id="stabilityai/sd-turbo",
-        stages=(
-            Stage(0,  0.28),
-            Stage(10, 0.32),
-            Stage(25, 0.36),
-            Stage(40, 0.40),
-            ),
-        guidance_scale=1.0,
-        num_inference_steps=4,   
-        p=0.3,                  
-        target_size=384,
-        prompt="",
-        seed=123,
-        dtype="fp16"
-        )
-    
+    diff_aug = ControlNetAug(
+        alpha=0.95, # start mostly real; constant for now
+        prob_value=0.4, # augment ~40% of training samples
+        model_id="runwayml/stable-diffusion-v1-5",
+        controlnet_id="lllyasviel/control_v11p_sd15_seg",
+        prompt="endoscopy image, realistic lighting, different hospital scanner",
+        neg_prompt=None,
+        guidance_scale=3.5,
+        condn_scale=1.0,
+        num_inference_steps=20,
+        target_img_size=image_size[0], # match to avoid extra resize
+        random_seed=123,
+        dtype="fp16",
+        device=None,                   
+        alpha_schedule=None, # None = curriculum inactive
+        total_epochs=None, # unused while schedule is None
+    )
 
     train_ds = DiffusedKvasirDataset(
         data=train_data,
@@ -76,7 +66,6 @@ def main():
         mask_size=mask_size,
         diff_aug=diff_aug,
     )
-
     test_ds = DiffusedKvasirDataset(
         data=test_data,
         mode="test",
@@ -85,29 +74,12 @@ def main():
         diff_aug=None,
     )
 
-    train_loader = DataLoader(train_ds, batch_size=4, shuffle=True, num_workers=0, pin_memory=True)
-    test_loader = DataLoader(test_ds, batch_size=4, shuffle=False, num_workers=0, pin_memory=True)
+    train_loader = DataLoader(train_ds, batch_size=4, shuffle=True,
+                              num_workers=0, pin_memory=True)
+    test_loader = DataLoader(test_ds, batch_size=4, shuffle=False,
+                             num_workers=0, pin_memory=True)
 
 
-    turbo_strengths = [0.28, 0.32, 0.36, 0.40]
-    saved_paths = save_stagewise_examples(
-        diff_aug=diff_aug,
-        samples=[train_data[i] for i in range(min(4, len(train_data)))],
-        image_size=(384, 384),
-        strengths=turbo_strengths,
-        steps=None,        
-        guidance=None,       
-        target_size=None,   
-        out_dir=output_path,
-        prefix="stagewise",
-        max_examples=4,
-    )
-
-    logger.info(f"Saved stage-wise diffusion grids:\n  " + "\n  ".join(saved_paths))
-
-    # ============================================================
-    #  Model, loss, optimizer, scheduler
-    # ============================================================
     model_name = env_vars.get("model_name", "segformer")
     model_config = env_vars.get("model_config", "b0")
 
@@ -116,13 +88,19 @@ def main():
 
     criterion = select_criterion(model_name)
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
-    scheduler = get_lr_scheduler(optimizer, num_epochs=60, warmup_epochs=5, min_lr=1e-6)
 
-    # ============================================================
-    #  Train
-    # ============================================================
+    num_epochs = 50
+    scheduler = get_lr_scheduler(optimizer, num_epochs=num_epochs,
+                                 warmup_epochs=5, min_lr=1e-6)
+
     best_model_save_path = os.path.join(output_path, f"{model_name}_{model_config}")
     os.makedirs(output_path, exist_ok=True)
+
+    # NOTE (for later curriculum):
+    #   IMPLEMENT
+    #   IMPLEMENT
+    #   IMPLEMENT
+    #   IMPLEMENT
 
     best_model, losses, ma_losses, dice_scores, miou_scores = training_loop(
         dataloader=train_loader,
@@ -135,13 +113,14 @@ def main():
         device=device,
         threshold=0.005,        # convergence tolerance
         ma_window=5,
-        max_epochs=60,
+        max_epochs=num_epochs,
         min_epochs=10,
         best_model_save_path=best_model_save_path,
         logger=logger,
         use_scheduler=True,
         save_model=True,
     )
+
     paths = save_training_curves(
         losses=losses,
         ma_losses=ma_losses,
