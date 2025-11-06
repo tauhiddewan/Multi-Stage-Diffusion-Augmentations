@@ -98,7 +98,7 @@ class ControlNetAug:
         output = self.pipeline(
             prompt=self.prompt, 
             negative_prompt=self.neg_prompt, 
-            control_image=blank_mask_map, 
+            image=blank_mask_map, 
             height=self.target_img_size, 
             width=self.target_img_size, 
             guidance_scale=self.guidance_scale, 
