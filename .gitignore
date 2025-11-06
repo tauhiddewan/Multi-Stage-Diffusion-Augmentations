@@ -2,3 +2,4 @@ data
 outputs
 .env
 utils/__pycache__
+checkpoints
