@@ -28,7 +28,9 @@ class ControlNetAug:
             target_img_size = 384, 
             random_seed = 123, 
             dtype = "fp16", 
-            device = "cuda"
+            device = "cuda", 
+            alpha_schedule=None, 
+            total_epochs=None
     ):
         self.alpha = alpha 
         self.prob_value = prob_value
@@ -44,8 +46,11 @@ class ControlNetAug:
         self.dtype = dtype
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-        torch_dtype = torch.float16 if (dtype=="fp16" and self.device=="cuda") else torch.float32
+        ### Curriculum settings
+        self.alpha_schedule = alpha_schedule
+        self.total_epochs = total_epochs
 
+        torch_dtype = torch.float16 if (dtype=="fp16" and self.device=="cuda") else torch.float32
         controlnet = ControlNetModel.from_pretrained(
             pretrained_model_name_or_path=controlnet_id, 
             torch_dtype=torch_dtype, 
@@ -61,6 +66,12 @@ class ControlNetAug:
         ).to(self.device)
         self.pipeline.set_progress_bar_config(disable=True)
 
+
+    def set_epoch(self, epoch: int):
+        if self.alpha_schedule is not None:
+            T = self.total_epochs or 1
+            e = max(0, min(epoch, T - 1))
+            self.alpha = float(self.alpha_schedule(e, T))
 
     @torch.inference_mode()
     def __call__(self, img_tensor, msk_tensor):
