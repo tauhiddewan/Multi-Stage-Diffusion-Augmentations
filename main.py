@@ -14,7 +14,7 @@ from utils.loss import select_criterion
 from utils.train import training_loop, test_loop, get_lr_scheduler
 from utils.plots import save_training_curves
 from utils.misc import create_logger
-
+from utils.vis_simple import save_diff_example, save_diff_batch
 
 def alpha_linear(epoch, T, a0=0.95, a1=0.40):
     t = 0 if T is None or T <= 1 else epoch / (T - 1)
@@ -58,6 +58,13 @@ def main():
         alpha_schedule=None, # None = curriculum inactive
         total_epochs=None, # unused while schedule is None
     )
+
+    _ = save_diff_batch(diff_aug,
+                        samples=[train_data[i] for i in range(min(6, len(train_data)))],
+                        image_size=(384,384),
+                        out_dir=output_path,
+                        prefix="diff")
+    
 
     train_ds = DiffusedKvasirDataset(
         data=train_data,
