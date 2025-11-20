@@ -41,23 +41,40 @@ def main():
     mask_size = (96, 96)      # mask for model head (downsampled)
     output_path = env_vars.get("output_folder_path", "./outputs")
 
+    # diff_aug = ControlNetAug(
+    #     alpha = float(env_vars.get("alpha", 0.95)), # start mostly real; constant for now
+    #     prob_value=float(env_vars.get("prob_value", 0.4)), # augment ~40% of training samples
+    #     model_id="runwayml/stable-diffusion-v1-5",
+    #     controlnet_id="lllyasviel/control_v11p_sd15_seg",
+    #     prompt=str(env_vars.get("prompt", "colonscopic image, realistic lighting, different hospital scanner")),
+    #     neg_prompt=None,
+    #     guidance_scale=1.0,
+    #     condn_scale=0.5,
+    #     num_inference_steps=10,
+    #     target_img_size=image_size[0], # match to avoid extra resize
+    #     random_seed=123,
+    #     dtype="fp16",
+    #     device=device,                   
+    #     alpha_schedule=None, # None = curriculum inactive
+    #     total_epochs=None, # unused while schedule is None
+    # )
+
     diff_aug = ControlNetAug(
-        alpha = float(env_vars.get("alpha", 0.95)), # start mostly real; constant for now
-        prob_value=0.4, # augment ~40% of training samples
-        model_id="runwayml/stable-diffusion-v1-5",
-        controlnet_id="lllyasviel/control_v11p_sd15_seg",
-        prompt=str(env_vars.get("prompt", "colonscopic image, realistic lighting, different hospital scanner")),
-        neg_prompt=None,
-        guidance_scale=3.5,
-        condn_scale=1.0,
-        num_inference_steps=20,
-        target_img_size=image_size[0], # match to avoid extra resize
-        random_seed=123,
+        alpha = float(env_vars.get("alpha")),
+        prob_value = float(env_vars.get("prob_value")),
+        model_id = str(env_vars.get("model_id")),
+        controlnet_id = env_vars.get("controlnet_id"),
+        prompt = str(env_vars.get("prompt")),
+        neg_prompt =  str(env_vars.get("neg_prompt")),
+        guidance_scale = float(env_vars.get("guidance_scale")),
+        condn_scale = float(env_vars.get("guidance_scale")),
+        num_inference_steps = int(env_vars.get("num_inference_steps")),
+        target_img_size = image_size[0],
+        random_seed = 123,
         dtype="fp16",
-        device=None,                   
-        alpha_schedule=None, # None = curriculum inactive
-        total_epochs=None, # unused while schedule is None
+        device=device
     )
+
 
     _ = save_diff_batch(diff_aug,
                         samples=[train_data[i] for i in range(min(6, len(train_data)))],
@@ -118,14 +135,14 @@ def main():
         scheduler=scheduler,
         criterion=criterion,
         device=device,
-        threshold=0.005,        # convergence tolerance
-        ma_window=5,
-        max_epochs=num_epochs,
-        min_epochs=10,
+        threshold=float(env_vars.get("threshold", 0.005)),        # convergence tolerance
+        ma_window=int(env_vars.get("ma_window", 10)),
+        max_epochs=int(env_vars.get("max_epochs", 100)),
+        min_epochs=int(env_vars.get("min_epochs", 20)),
         best_model_save_path=best_model_save_path,
         logger=logger,
-        use_scheduler=True,
-        save_model=True,
+        use_scheduler=bool(env_vars.get("use_scheduler", False)),
+        save_model=bool(env_vars.get("save_model", True))
     )
 
     paths = save_training_curves(
