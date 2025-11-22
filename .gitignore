@@ -4,3 +4,4 @@ outputs
 utils/__pycache__
 checkpoints
 *outputs
+output.log
