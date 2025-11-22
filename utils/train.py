@@ -70,96 +70,6 @@ def check_stopping_conditions(epoch_loss_list,
     
     return False
 
-        
-def training_loop(dataloader, 
-                  model, 
-                  model_name,
-                  train_data_size,
-                  optimizer,
-                  scheduler,
-                  criterion,
-                  device,
-                  threshold, 
-                  ma_window,
-                  max_epochs, 
-                  min_epochs, 
-                  best_model_save_path, 
-                  logger,
-                  use_scheduler = False, 
-                  save_model=True):
-    model.to(device)
-    model.train()
-    epoch_loss_list, ma_loss_list, epoch_dice_score_list, epoch_miou_score_list  = [], [], [], []
-    min_loss = float('inf')
-    best_model, best_optimizer = None, None
-    epoch = 0
-    
-    logger.info(f"Choosen train subset has: {train_data_size} data")
-    logger.info(f'Training started...')
-    while True:
-        model.train()
-        epoch += 1
-        model, optimizer, mean_epoch_loss, mean_epoch_dice_score, mean_epoch_miou_score = training_step(
-            dataloader=dataloader,
-            model=model, 
-            model_name=model_name, 
-            optimizer=optimizer, 
-            criterion=criterion, 
-            device=device)
-        
-        epoch_loss_list.append(mean_epoch_loss)
-        epoch_dice_score_list.append(mean_epoch_dice_score)
-        epoch_miou_score_list.append(mean_epoch_miou_score)
-        
-        ma_loss = np.mean(epoch_loss_list[-ma_window:])
-        ma_loss_list.append(ma_loss)
-        
-        logger.info(f"Epoch [{epoch:04}], Loss: {mean_epoch_loss:.4f}, MA loss: {ma_loss:.4f}, Dice Score: {mean_epoch_dice_score:.4f}, mIoU Score: {mean_epoch_miou_score:.4f}")
-
-        if mean_epoch_loss<min_loss:
-            best_model_epoch = epoch
-            min_loss_dice_score = mean_epoch_dice_score
-            min_loss_miou_score = mean_epoch_miou_score
-            min_loss = mean_epoch_loss
-            best_model = copy.deepcopy(model)
-            best_optimizer = copy.deepcopy(optimizer)                   
-                              
-        stopping = check_stopping_conditions(
-            epoch_loss_list=epoch_loss_list,
-            current_loss=epoch_loss_list[-1],
-            current_ma_loss=ma_loss,
-            ma_window=ma_window, 
-            threshold=threshold, 
-            min_epochs=min_epochs) 
-        
-        if stopping:
-            logger.warning(f"Metrics converged and loss stabilized. Training stopped!")
-            break
-        if epoch >= max_epochs:
-            logger.warning("Reached maximum number of epochs. Training stopped")
-            break
-         
-        if use_scheduler:
-            scheduler.step()
-    
-    if save_model==True and best_model is not None:
-        torch.save({
-            'model_state_dict': best_model.state_dict(),
-            'optimizer_state_dict': best_optimizer.state_dict()
-        }, f'{best_model_save_path}.traindata_{train_data_size}.pt')
-        logger.info(f"Best model found at Epoch: {best_model_epoch:04}. Loss: {min_loss:.4f}, Dice score: {min_loss_dice_score:.4f}, mIoU score: {min_loss_miou_score:.4f}")
-    
-    return best_model, epoch_loss_list, ma_loss_list, epoch_dice_score_list, epoch_miou_score_list
-
-def get_entropy(test_dice_scores):
-    bins = np.arange(0, 1.1, 0.1)
-    scores = np.array([score.cpu().item() if torch.is_tensor(score) else score for score in sorted(test_dice_scores)])
-    counts, _ = np.histogram(scores, bins=bins)
-    probabilities = counts / len(scores)
-    entropy = -np.sum(probabilities[probabilities > 0] * np.log(probabilities[probabilities > 0]))
-    return probabilities, entropy 
-
-
 def test_loop(model, 
               model_name,
               test_dataloader, 
@@ -262,3 +172,145 @@ def cleanup_iteration(variables, device, logger, wait_time: int = 5):
     
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
+
+
+
+def training_loop(dataloader, 
+                  model, 
+                  model_name,
+                  train_data_size,
+                  optimizer,
+                  scheduler,
+                  criterion,
+                  device,
+                  threshold, 
+                  ma_window,
+                  max_epochs, 
+                  min_epochs, 
+                  best_model_save_path, 
+                  logger,
+                  use_scheduler=False, 
+                  save_model=True,
+                  val_dataloader=None,         # <-- NEW: optional validation loader
+                  val_num_repeat=1):           # <-- NEW: how many times to average val
+    model.to(device)
+    model.train()
+
+    # train metrics (same as before)
+    epoch_loss_list = []
+    ma_loss_list = []
+    epoch_dice_score_list = []
+    epoch_miou_score_list = []
+
+    # validation metrics (only used internally for convergence / best model)
+    val_loss_list = []
+
+    min_loss = float('inf')   # best loss (train or val, depending on what's used)
+    best_model, best_optimizer = None, None
+    best_model_epoch = 0
+    min_loss_dice_score, min_loss_miou_score = 0.0, 0.0
+
+    epoch = 0
+    
+    logger.info(f"Choosen train subset has: {train_data_size} data")
+    logger.info(f"Training started...")
+    while True:
+        epoch += 1
+        model.train()
+
+        # -------- TRAIN STEP --------
+        model, optimizer, mean_epoch_loss, mean_epoch_dice_score, mean_epoch_miou_score = training_step(
+            dataloader=dataloader,
+            model=model, 
+            model_name=model_name, 
+            optimizer=optimizer, 
+            criterion=criterion, 
+            device=device
+        )
+        
+        epoch_loss_list.append(mean_epoch_loss)
+        epoch_dice_score_list.append(mean_epoch_dice_score)
+        epoch_miou_score_list.append(mean_epoch_miou_score)
+
+        # -------- VALIDATION via test_loop (if provided) --------
+        if val_dataloader is not None:
+            val_loss, val_dice, val_iou = test_loop(
+                model=model,
+                model_name=model_name,
+                test_dataloader=val_dataloader,
+                criterion=criterion,
+                device=device,
+                num_repeat=val_num_repeat,
+            )
+            val_loss_list.append(val_loss)
+
+            # For convergence & best model, use VALIDATION loss
+            loss_for_early_stop = val_loss
+            history_for_ma = val_loss_list
+
+            logger.info(
+                f"Epoch [{epoch:04}] "
+                f"Train - Loss: {mean_epoch_loss:.4f}, Dice: {mean_epoch_dice_score:.4f}, mIoU: {mean_epoch_miou_score:.4f} | "
+                f"Val - Loss: {val_loss:.4f}, Dice: {val_dice:.4f}, mIoU: {val_iou:.4f}"
+            )
+        else:
+            # No validation loader: keep original behaviour (train-only)
+            loss_for_early_stop = mean_epoch_loss
+            history_for_ma = epoch_loss_list
+
+            logger.info(
+                f"Epoch [{epoch:04}], Loss: {mean_epoch_loss:.4f}, "
+                f"Dice Score: {mean_epoch_dice_score:.4f}, mIoU Score: {mean_epoch_miou_score:.4f}"
+            )
+
+        # -------- Moving-average loss (on whichever loss we're using) --------
+        ma_loss = np.mean(history_for_ma[-ma_window:])
+        ma_loss_list.append(ma_loss)
+
+        # -------- Track best model based on loss_for_early_stop --------
+        if loss_for_early_stop < min_loss:
+            min_loss = loss_for_early_stop
+            best_model_epoch = epoch
+
+            if val_dataloader is not None:
+                min_loss_dice_score = val_dice
+                min_loss_miou_score = val_iou
+            else:
+                min_loss_dice_score = mean_epoch_dice_score
+                min_loss_miou_score = mean_epoch_miou_score
+
+            best_model = copy.deepcopy(model)
+            best_optimizer = copy.deepcopy(optimizer)
+
+        # -------- Check convergence / early stopping --------
+        stopping = check_stopping_conditions(
+            epoch_loss_list=history_for_ma,
+            current_loss=loss_for_early_stop,
+            current_ma_loss=ma_loss,
+            ma_window=ma_window, 
+            threshold=threshold, 
+            min_epochs=min_epochs
+        )
+        
+        if stopping:
+            logger.warning("Metrics converged and loss stabilized. Training stopped!")
+            break
+        if epoch >= max_epochs:
+            logger.warning("Reached maximum number of epochs. Training stopped")
+            break
+         
+        if use_scheduler:
+            scheduler.step()
+    
+    if save_model and best_model is not None:
+        torch.save({
+            'model_state_dict': best_model.state_dict(),
+            'optimizer_state_dict': best_optimizer.state_dict()
+        }, f'{best_model_save_path}.traindata_{train_data_size}.pt')
+        logger.info(
+            f"Best model found at Epoch: {best_model_epoch:04}. "
+            f"Loss: {min_loss:.4f}, Dice score: {min_loss_dice_score:.4f}, "
+            f"mIoU score: {min_loss_miou_score:.4f}"
+        )
+    
+    return best_model, epoch_loss_list, ma_loss_list, epoch_dice_score_list, epoch_miou_score_list
