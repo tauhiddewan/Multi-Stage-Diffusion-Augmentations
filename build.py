@@ -62,9 +62,9 @@ def main():
     data = {
         "train_data": train_data,
         "val_data": val_data,
-        "test_data": test_data_id,      # in-distribution test set
-        "test_ood1": ood1_pairs,        # OOD1: cvc-clinicdb
-        "test_ood2": ood2_pairs,        # OOD2: cvc-colondb
+        "test_data_id": test_data_id,      # in-distribution test set
+        "test_data_ood1": ood1_pairs,        # OOD1: cvc-clinicdb
+        "test_data_ood2": ood2_pairs,        # OOD2: cvc-colondb
     }
 
     out_path = os.path.join(data_root, pickle_filename)
