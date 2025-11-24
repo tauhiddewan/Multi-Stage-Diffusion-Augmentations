@@ -50,7 +50,7 @@ python -m pip install -r requirements.txt
 Run the following command for training:
 
 ```bash
-nohup main.py > output.log 2>&1 &
+nohup python main.py > output.log 2>&1 &
 ```
 
 
