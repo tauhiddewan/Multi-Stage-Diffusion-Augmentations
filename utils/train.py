@@ -218,6 +218,10 @@ def training_loop(dataloader,
         epoch += 1
         model.train()
 
+        ## curriculum epoch set
+        if hasattr(dataloader.dataset, "diff_aug") and dataloader.dataset.diff_aug is not None:
+            dataloader.dataset.diff_aug.set_epoch(epoch)
+
         # -------- TRAIN STEP --------
         model, optimizer, mean_epoch_loss, mean_epoch_dice_score, mean_epoch_miou_score = training_step(
             dataloader=dataloader,
