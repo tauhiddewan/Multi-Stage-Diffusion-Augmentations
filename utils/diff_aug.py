@@ -73,49 +73,84 @@ class ControlNetAug:
             e = max(0, min(epoch, T - 1))
             self.alpha = float(self.alpha_schedule(e, T))
 
+    
     @torch.inference_mode()
     def __call__(self, img_tensor, msk_tensor):
-        if self.alpha >= 0.999 or self.rng.random() > self.prob_value: #probability gate + alpha short-circuit
-            return img_tensor  
-        
-        c, h, w = img_tensor.shape 
+        if self.alpha >= 0.999 or self.rng.random() > self.prob_value:
+            return img_tensor
 
-        ## building a RGB mask template
-        msk_tensor_binarized = (msk_tensor > 0.5).float() 
-        msk_tensor_resized  = F.interpolate(
-            input=msk_tensor_binarized.unsqueeze(0), 
+        c, h, w = img_tensor.shape
+
+        # -----------------------------
+        # 1) Prepare binary masks
+        # -----------------------------
+        # Full-resolution binary mask (for blending)
+        msk_full = (msk_tensor > 0.5).float()          # [1,H,W]
+
+        # Downsampled / resized mask for ControlNet template
+        msk_resized = F.interpolate(
+            input=msk_full.unsqueeze(0),               # [1,1,H,W]
             size=(self.target_img_size, self.target_img_size),
             mode="nearest"
-            ).squeeze(0).squeeze(0)
-        
-        blank_mask_map = np.zeros((self.target_img_size, self.target_img_size, 3), dtype=np.uint8)
-        blank_mask_map[..., 0] = (msk_tensor_resized.detach().cpu().numpy() * 255).astype(np.uint8)
-        blank_mask_map = Image.fromarray(blank_mask_map) 
+        ).squeeze(0).squeeze(0)                        # [Hc,Wc]
 
-        ## generating a synthetic image that matches templates layout 
+        # Build 3-channel control image (mask in red channel)
+        blank_mask_map = np.zeros(
+            (self.target_img_size, self.target_img_size, 3),
+            dtype=np.uint8
+        )
+        blank_mask_map[..., 0] = (
+            msk_resized.detach().cpu().numpy() * 255
+        ).astype(np.uint8)
+        blank_mask_map = Image.fromarray(blank_mask_map)
+
+        # -----------------------------
+        # 2) Run diffusion (ControlNet)
+        # -----------------------------
         generator = torch.Generator(device=self.device)
         generator.manual_seed(self.rng.randrange(0, 2**31 - 1))
+
         output = self.pipeline(
-            prompt=self.prompt, 
-            negative_prompt=self.neg_prompt, 
-            image=blank_mask_map, 
-            height=self.target_img_size, 
-            width=self.target_img_size, 
-            guidance_scale=self.guidance_scale, 
-            controlnet_conditioning_scale=self.condn_scale, 
-            num_inference_steps=self.num_inference_steps, 
+            prompt=self.prompt,
+            negative_prompt=self.neg_prompt,
+            image=blank_mask_map,
+            height=self.target_img_size,
+            width=self.target_img_size,
+            guidance_scale=self.guidance_scale,
+            controlnet_conditioning_scale=self.condn_scale,
+            num_inference_steps=self.num_inference_steps,
             generator=generator
         )
-        diff_aug_img = output.images[0] #first generated image
 
-        ## mixing 
+        diff_aug_img = output.images[0]  # PIL
+
+        # Resize to match original tensor spatial size
         if diff_aug_img.size != (w, h):
             diff_aug_img = diff_aug_img.resize(
                 size=(w, h),
                 resample=Image.BICUBIC
             )
-        diff_aug_img = pil_to_tensor(diff_aug_img).clamp(0, 1)  #Blending can sometimes push values slightly outside due to float precision
 
-        infused_img = self.alpha * img_tensor + (1-self.alpha)*diff_aug_img
+        diff_aug_img = pil_to_tensor(diff_aug_img).clamp(0, 1)  # [3,H,W]
+
+        # -----------------------------
+        # 3) Background-only blending
+        # -----------------------------
+        # Ensure mask size matches tensor size
+        if msk_full.shape[-2:] != (h, w):
+            msk_full = F.interpolate(
+                msk_full.unsqueeze(0), size=(h, w), mode="nearest"
+            ).squeeze(0)
+
+        msk_full = msk_full.to(img_tensor.device)      # [1,H,W]
+        msk_full_3 = msk_full.expand_as(img_tensor)    # [3,H,W]
+        bg_mask_3 = 1.0 - msk_full_3                   # [3,H,W]
+
+        # Blend ONLY in the background:
+        #   - inside polyp: keep original image
+        #   - outside polyp: alpha-blend original and diffused
+        bg_blended = self.alpha * img_tensor + (1.0 - self.alpha) * diff_aug_img
+        infused_img = msk_full_3 * img_tensor + bg_mask_3 * bg_blended
+
         return infused_img.clamp(0, 1)
 
