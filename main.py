@@ -30,15 +30,11 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", message="The given NumPy array is not writable")
 
 
-def alpha_linear(epoch, T, a0=0.95, a1=0.40):
-    t = 0 if T is None or T <= 1 else epoch / (T - 1)
+def alpha_curriculum(epoch, T, a0=1.0, a1=0.5):
+    if T <= 1:
+        return a1
+    t = epoch / (T - 1)
     return a0 * (1 - t) + a1 * t
-
-
-def alpha_cosine(epoch, T, a0=0.95, a1=0.40):
-    t = 0 if T is None or T <= 1 else epoch / (T - 1)
-    w = 0.5 * (1 - math.cos(math.pi * t))
-    return a0 * (1 - w) + a1 * w
 
 
 def str2bool(x):
@@ -113,23 +109,25 @@ def main():
         random_seed=123,
         dtype="fp16",
         device=device,
+        alpha_schedule=alpha_curriculum,
+        total_epochs=num_epochs
     )
 
     # Sanity-check a few diffusion examples (OPTIONAL)
-    samples = []
-    for i in range(min(6, len(train_data))):
-        img_path, mask_path = train_data[i]
-        img_pil = Image.open(img_path).convert("RGB")
-        mask_pil = Image.open(mask_path).convert("L")
-        samples.append((img_pil, mask_pil))
+    # samples = []
+    # for i in range(min(6, len(train_data))):
+    #     img_path, mask_path = train_data[i]
+    #     img_pil = Image.open(img_path).convert("RGB")
+    #     mask_pil = Image.open(mask_path).convert("L")
+    #     samples.append((img_pil, mask_pil))
 
-    _ = save_diff_batch(
-        diff_aug,
-        samples=samples,
-        image_size=image_size,
-        out_dir=output_path,
-        prefix="diff",
-    )
+    # _ = save_diff_batch(
+    #     diff_aug,
+    #     samples=samples,
+    #     image_size=image_size,
+    #     out_dir=output_path,
+    #     prefix="diff",
+    # )
     # --------------------------
     # DATASETS & LOADERS
     # --------------------------
