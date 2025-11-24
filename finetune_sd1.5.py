@@ -4,53 +4,29 @@ import os
 import math
 import argparse
 import pickle
-from dataclasses import dataclass
 
 import torch
 from torch.utils.data import Dataset, DataLoader
+from torch import nn
 from torchvision import transforms
 from PIL import Image
 from tqdm.auto import tqdm
 
-from accelerate import Accelerator
 from diffusers import StableDiffusionPipeline, DDPMScheduler
-from diffusers.loaders import AttnProcsLayers
-from diffusers.models.attention_processor import LoRAAttnProcessor
 
 
 # -----------------------------
-# Config dataclass
+# Dataset from your pickle
 # -----------------------------
-@dataclass
-class TrainConfig:
-    pickle_path: str = "./data/dataset.pkl"             # your pickle file
-    output_dir: str = "./kvasir_lora_weights"
-
-    model_id: str = "runwayml/stable-diffusion-v1-5"
-    resolution: int = 512
-    train_batch_size: int = 4
-    num_epochs: int = 10
-    learning_rate: float = 1e-4
-    mixed_precision: str = "fp16"                  # "no", "fp16", "bf16"
-    gradient_accumulation_steps: int = 1
-    seed: int = 123
-
-    lora_rank: int = 4                             # LoRA rank
-    text_prompt: str = "colonoscopy image of colon mucosa with possible polyp"
-
-
-# -----------------------------
-# Dataset using pickle train_data
-# -----------------------------
-class KvasirLoRADataset(Dataset):
+class KvasirSDDataset(Dataset):
     """
-    Expects a list of (img_path, mask_path) pairs.
-    Uses only img_path for LoRA training.
+    Expects train_pairs as a list of (img_path, mask_path).
+    Uses only img_path for SD fine-tuning.
     """
 
-    def __init__(self, train_pairs, resolution=512, prompt="colonoscopy image"):
+    def __init__(self, train_pairs, resolution=512, prompt=None):
         self.train_pairs = train_pairs
-        self.prompt = prompt
+        self.prompt = prompt or "colonoscopy image of colon mucosa with possible polyp"
 
         self.transform = transforms.Compose(
             [
@@ -66,109 +42,66 @@ class KvasirLoRADataset(Dataset):
         return len(self.train_pairs)
 
     def __getitem__(self, idx):
-        img_path, _ = self.train_pairs[idx]  # ignore mask path
+        img_path, _ = self.train_pairs[idx]
         img = Image.open(img_path).convert("RGB")
         img = self.transform(img)
         return {"pixel_values": img, "prompt": self.prompt}
 
 
 # -----------------------------
-# Create proper LoRA processors for UNet
+# Training function
 # -----------------------------
-def create_lora_attn_procs(unet, rank=4):
-    """
-    Create LoRA attention processors for all attention modules in the UNet,
-    following the pattern used by diffusers examples.
-    """
-    attn_procs = {}
-    for name in unet.attn_processors.keys():
-        # figure out the hidden_size for this block
-        if name.startswith("mid_block"):
-            hidden_size = unet.config.block_out_channels[-1]
-        elif name.startswith("up_blocks"):
-            block_id = int(name.split(".")[1])
-            hidden_size = list(reversed(unet.config.block_out_channels))[block_id]
-        elif name.startswith("down_blocks"):
-            block_id = int(name.split(".")[1])
-            hidden_size = unet.config.block_out_channels[block_id]
-        else:
-            # shouldn't really happen for SD1.5 UNet
-            continue
+def train(
+    pickle_path: str,
+    output_dir: str,
+    model_id: str = "runwayml/stable-diffusion-v1-5",
+    resolution: int = 512,
+    train_batch_size: int = 1,
+    num_epochs: int = 5,
+    learning_rate: float = 1e-5,
+    seed: int = 123,
+):
+    os.makedirs(output_dir, exist_ok=True)
 
-        # cross-attention dim: only for attn2 (context) branches
-        if name.endswith("attn2.processor"):
-            cross_attention_dim = unet.config.cross_attention_dim
-        else:
-            cross_attention_dim = None
+    # ---- Seed & device ----
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        attn_procs[name] = LoRAAttnProcessor(
-            hidden_size=hidden_size,
-            cross_attention_dim=cross_attention_dim,
-            rank=rank,
-        )
-
-    return attn_procs
-
-
-# -----------------------------
-# Training loop
-# -----------------------------
-def train(config: TrainConfig):
-    accelerator = Accelerator(
-        gradient_accumulation_steps=config.gradient_accumulation_steps,
-        mixed_precision=config.mixed_precision,
-    )
-    device = accelerator.device
-
-    if accelerator.is_local_main_process:
-        os.makedirs(config.output_dir, exist_ok=True)
-
-    # Seed
-    torch.manual_seed(config.seed)
-    torch.cuda.manual_seed_all(config.seed)
-
-    # -----------------------------
-    # Load pickle & extract train_data
-    # -----------------------------
-    if accelerator.is_local_main_process:
-        print(f"Loading dataset pickle from: {config.pickle_path}")
-    with open(config.pickle_path, "rb") as f:
+    # ---- Load pickle & train_data ----
+    print(f"Loading dataset pickle from: {pickle_path}")
+    with open(pickle_path, "rb") as f:
         data = pickle.load(f)
 
-    # Expecting keys like: "train_data", "val_data", "test_data_id", ...
     if "train_data" not in data:
-        raise KeyError("Expected key 'train_data' in pickle. Found keys: "
-                       f"{list(data.keys())}")
+        raise KeyError(
+            f"Expected key 'train_data' in pickle. Found keys: {list(data.keys())}"
+        )
 
     train_pairs = data["train_data"]  # list of (img_path, mask_path)
+    print(f"Found {len(train_pairs)} training samples in train_data")
 
-    if accelerator.is_local_main_process:
-        print(f"Found {len(train_pairs)} training samples in train_data")
-
-    dataset = KvasirLoRADataset(
+    dataset = KvasirSDDataset(
         train_pairs=train_pairs,
-        resolution=config.resolution,
-        prompt=config.text_prompt,
+        resolution=resolution,
+        prompt="colonoscopy image of colon mucosa with possible polyp",
     )
     dataloader = DataLoader(
         dataset,
-        batch_size=config.train_batch_size,
+        batch_size=train_batch_size,
         shuffle=True,
         num_workers=4,
         pin_memory=True,
     )
 
-    # -----------------------------
-    # Load base SD1.5 pipeline
-    # -----------------------------
-    if accelerator.is_local_main_process:
-        print(f"Loading base model: {config.model_id}")
+    # ---- Load base SD1.5 pipeline in FP32 ----
+    print(f"Loading base model: {model_id}")
     pipe = StableDiffusionPipeline.from_pretrained(
-        config.model_id,
-        torch_dtype=torch.float16 if config.mixed_precision == "fp16" else torch.float32,
+        model_id,
+        torch_dtype=torch.float32,   # keep everything in fp32 to avoid dtype issues
         safety_checker=None,
     )
-    # use DDPM scheduler for training
+    # Use DDPM scheduler for training
     pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
     pipe.to(device)
 
@@ -177,143 +110,108 @@ def train(config: TrainConfig):
     vae = pipe.vae
     unet = pipe.unet
 
-    # Freeze everything except LoRA layers
+    # Freeze VAE & text encoder; train UNet only
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
-    unet.requires_grad_(False)
+    unet.requires_grad_(True)
 
-    # -----------------------------
-    # Create and attach LoRA processors
-    # -----------------------------
-    if accelerator.is_local_main_process:
-        print("Creating LoRA attention processors...")
-    lora_attn_procs = create_lora_attn_procs(unet, rank=config.lora_rank)
-    unet.set_attn_processor(lora_attn_procs)
+    optimizer = torch.optim.AdamW(unet.parameters(), lr=learning_rate)
+    mse_loss = nn.MSELoss()
 
-    # Wrap them in AttnProcsLayers so we can optimize them easily
-    lora_layers = AttnProcsLayers(unet.attn_processors)
-    lora_layers.to(device)
-
-    # Optimizer
-    optimizer = torch.optim.AdamW(lora_layers.parameters(), lr=config.learning_rate)
-
-    # Prepare with accelerate
-    lora_layers, optimizer, dataloader = accelerator.prepare(
-        lora_layers, optimizer, dataloader
-    )
-
-    num_update_steps_per_epoch = math.ceil(len(dataloader) / 1)
-    max_train_steps = config.num_epochs * num_update_steps_per_epoch
-
-    if accelerator.is_local_main_process:
-        print(f"Training for {config.num_epochs} epochs "
-              f"({max_train_steps} steps total approx.)")
+    num_update_steps_per_epoch = math.ceil(len(dataloader))
+    max_train_steps = num_epochs * num_update_steps_per_epoch
+    print(f"Training for {num_epochs} epochs (~{max_train_steps} steps)")
 
     global_step = 0
-    for epoch in range(config.num_epochs):
-        if accelerator.is_local_main_process:
-            print(f"\nEpoch {epoch+1}/{config.num_epochs}")
-        unet.train()
+    unet.train()
 
-        prog_bar = tqdm(dataloader, disable=not accelerator.is_local_main_process)
-        for step, batch in enumerate(prog_bar):
-            with accelerator.accumulate(lora_layers):
-                # 1) Encode text
-                prompts = batch["prompt"]
-                tokenized = tokenizer(
-                    list(prompts),
-                    padding="max_length",
-                    max_length=tokenizer.model_max_length,
-                    truncation=True,
-                    return_tensors="pt",
-                )
-                input_ids = tokenized.input_ids.to(device)
+    for epoch in range(num_epochs):
+        print(f"\nEpoch {epoch + 1}/{num_epochs}")
+        pbar = tqdm(dataloader)
+        for batch in pbar:
+            pixel_values = batch["pixel_values"].to(device=device, dtype=torch.float32)
 
-                with torch.no_grad():
-                    encoder_hidden_states = text_encoder(input_ids)[0]
+            # 1) Encode text prompts
+            prompts = batch["prompt"]
+            tokens = tokenizer(
+                list(prompts),
+                padding="max_length",
+                truncation=True,
+                max_length=tokenizer.model_max_length,
+                return_tensors="pt",
+            )
+            input_ids = tokens.input_ids.to(device)
 
-                # 2) Image -> latent
-                pixel_values = batch["pixel_values"].to(device)
-                with torch.no_grad():
-                    latents = vae.encode(pixel_values).latent_dist.sample()
-                    latents = latents * vae.config.scaling_factor
+            with torch.no_grad():
+                encoder_hidden_states = text_encoder(input_ids)[0]
 
-                # 3) Sample noise and timesteps
-                noise = torch.randn_like(latents)
-                timesteps = torch.randint(
-                    0, pipe.scheduler.num_train_timesteps,
-                    (latents.shape[0],),
-                    device=device,
-                    dtype=torch.long,
-                )
+            # 2) Encode images to latents
+            with torch.no_grad():
+                latents = vae.encode(pixel_values).latent_dist.sample()
+                latents = latents * vae.config.scaling_factor
 
-                noisy_latents = pipe.scheduler.add_noise(latents, noise, timesteps)
+            # 3) Sample noise & timesteps
+            noise = torch.randn_like(latents, device=device)
+            timesteps = torch.randint(
+                0,
+                pipe.scheduler.config.num_train_timesteps,  # use config to avoid warning
+                (latents.shape[0],),
+                device=device,
+                dtype=torch.long,
+            )
 
-                # 4) Predict noise with UNet (with LoRA)
-                model_pred = unet(
-                    noisy_latents,
-                    timesteps,
-                    encoder_hidden_states=encoder_hidden_states,
-                ).sample
+            noisy_latents = pipe.scheduler.add_noise(latents, noise, timesteps)
 
-                # 5) Loss: MSE between predicted noise and true noise
-                loss = torch.nn.functional.mse_loss(model_pred, noise)
-                accelerator.backward(loss)
+            optimizer.zero_grad(set_to_none=True)
 
-                optimizer.step()
-                optimizer.zero_grad()
+            # 4) Predict noise with UNet (all fp32)
+            model_pred = unet(
+                noisy_latents,
+                timesteps,
+                encoder_hidden_states=encoder_hidden_states,
+            ).sample
+            loss = mse_loss(model_pred, noise)
 
-                global_step += 1
+            # 5) Backward & step
+            loss.backward()
+            optimizer.step()
 
-                if accelerator.is_local_main_process:
-                    prog_bar.set_postfix({"loss": loss.item()})
+            global_step += 1
+            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
-        if accelerator.is_local_main_process:
-            print(f"Epoch {epoch+1} done. Last loss: {loss.item():.4f}")
+        print(f"Epoch {epoch + 1} finished. Last loss: {loss.item():.4f}")
 
-    # -----------------------------
-    # Save LoRA weights
-    # -----------------------------
-    accelerator.wait_for_everyone()
-    if accelerator.is_local_main_process:
-        # CPU copy of LoRA layers
-        lora_state_dict = accelerator.unwrap_model(lora_layers).state_dict()
-        save_path = os.path.join(config.output_dir, "kvasir_lora.pt")
-        torch.save(lora_state_dict, save_path)
-        print(f"\nSaved LoRA weights to: {save_path}")
+    # ---- Save fine-tuned pipeline ----
+    save_dir = os.path.join(output_dir, "sd15_kvasir_finetuned")
+    print(f"\nSaving fine-tuned model to: {save_dir}")
+    pipe.save_pretrained(save_dir)
+    print("Done.")
 
 
 # -----------------------------
-# CLI entry point
+# CLI entry
 # -----------------------------
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pickle_path", type=str, default="./dataset.pkl",
+    parser.add_argument("--pickle_path", type=str, default="./data/dataset.pkl",
                         help="Path to your dataset pickle.")
-    parser.add_argument("--output_dir", type=str, default="./kvasir_lora_weights")
-    parser.add_argument("--num_epochs", type=int, default=10)
-    parser.add_argument("--train_batch_size", type=int, default=4)
-    parser.add_argument("--learning_rate", type=float, default=1e-4)
+    parser.add_argument("--output_dir", type=str, default="./sd_finetuned")
+    parser.add_argument("--model_id", type=str, default="runwayml/stable-diffusion-v1-5")
     parser.add_argument("--resolution", type=int, default=512)
-    parser.add_argument("--lora_rank", type=int, default=4)
-    parser.add_argument(
-        "--text_prompt",
-        type=str,
-        default="colonoscopy image of colon mucosa with possible polyp",
-    )
+    parser.add_argument("--train_batch_size", type=int, default=1)
+    parser.add_argument("--num_epochs", type=int, default=5)
+    parser.add_argument("--learning_rate", type=float, default=1e-5)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    cfg = TrainConfig(
+    train(
         pickle_path=args.pickle_path,
         output_dir=args.output_dir,
-        num_epochs=args.num_epochs,
-        train_batch_size=args.train_batch_size,
-        learning_rate=args.learning_rate,
+        model_id=args.model_id,
         resolution=args.resolution,
-        lora_rank=args.lora_rank,
-        text_prompt=args.text_prompt,
+        train_batch_size=args.train_batch_size,
+        num_epochs=args.num_epochs,
+        learning_rate=args.learning_rate,
     )
-    train(cfg)
