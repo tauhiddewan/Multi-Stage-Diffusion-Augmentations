@@ -30,7 +30,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", message="The given NumPy array is not writable")
 
 
-def alpha_curriculum(epoch, T, a0=1.0, a1=0.5):
+def alpha_curriculum(epoch, T, a0=1.0, a1=0.8):
     if T <= 1:
         return a1
     t = epoch / (T - 1)
@@ -96,14 +96,14 @@ def main():
     # DIFFUSION AUG
     # --------------------------
     diff_aug = ControlNetAug(
-        alpha=float(env_vars.get("alpha", 0.5)),
+        alpha=float(env_vars.get("start_alpha", 0.5)),
         prob_value=float(env_vars.get("prob_value", 1.0)),
         model_id=str(env_vars.get("model_id")),
         controlnet_id=env_vars.get("controlnet_id"),
         prompt=str(env_vars.get("prompt", "")),
         neg_prompt=str(env_vars.get("neg_prompt", "")),
         guidance_scale=float(env_vars.get("guidance_scale", 7.5)),
-        condn_scale=float(env_vars.get("guidance_scale", 7.5)),
+        condn_scale=float(env_vars.get("condn_scale", 1.2)),
         num_inference_steps=int(env_vars.get("num_inference_steps", 20)),
         target_img_size=image_size[0],
         random_seed=123,
