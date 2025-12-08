@@ -12,6 +12,29 @@ def pil_to_tensor(img):
         arr = np.repeat(arr[..., None], 3, axis=2)
     return torch.from_numpy(arr).permute(2, 0, 1).float() / 255.0
 
+def gaussian_blur_tensor(x, kernel_size=9, sigma=3.0):
+    """
+    x: [C,H,W], values in [0,1]
+    returns blurred x with depthwise conv2d
+    """
+    c, h, w = x.shape
+    # 1D Gaussian
+    coords = torch.arange(kernel_size, dtype=torch.float32) - (kernel_size - 1) / 2.0
+    g = torch.exp(-(coords**2) / (2 * sigma**2))
+    g = g / g.sum()
+    # 2D separable kernel
+    kernel_2d = torch.outer(g, g)
+    kernel_2d = kernel_2d / kernel_2d.sum()
+    # [C,1,kh,kw] for depthwise conv
+    kernel = kernel_2d.view(1, 1, kernel_size, kernel_size).to(x.device)
+    kernel = kernel.repeat(c, 1, 1, 1)  # [C,1,kh,kw]
+
+    x_ = x.unsqueeze(0)  # [1,C,H,W]
+    padding = kernel_size // 2
+    x_blur = F.conv2d(x_, kernel, padding=padding, groups=c)
+    return x_blur.squeeze(0)
+
+
 
 class ControlNetAug:
     def __init__(
@@ -137,20 +160,53 @@ class ControlNetAug:
         # 3) Background-only blending
         # -----------------------------
         # Ensure mask size matches tensor size
+        # if msk_full.shape[-2:] != (h, w):
+        #     msk_full = F.interpolate(
+        #         msk_full.unsqueeze(0), size=(h, w), mode="nearest"
+        #     ).squeeze(0)
+
+        # msk_full = msk_full.to(img_tensor.device)      # [1,H,W]
+        # msk_full_3 = msk_full.expand_as(img_tensor)    # [3,H,W]
+        # bg_mask_3 = 1.0 - msk_full_3                   # [3,H,W]
+
+        # # Blend ONLY in the background:
+        # #   - inside polyp: keep original image
+        # #   - outside polyp: alpha-blend original and diffused
+        # bg_blended = self.alpha * img_tensor + (1.0 - self.alpha) * diff_aug_img
+        # infused_img = msk_full_3 * img_tensor + bg_mask_3 * bg_blended
+
+        # return infused_img.clamp(0, 1)
+
+        # -----------------------------
+        # 4) Low-frequency style blending in background
+        # -----------------------------
+        # Ensure mask size matches tensor size
         if msk_full.shape[-2:] != (h, w):
             msk_full = F.interpolate(
                 msk_full.unsqueeze(0), size=(h, w), mode="nearest"
             ).squeeze(0)
 
-        msk_full = msk_full.to(img_tensor.device)      # [1,H,W]
-        msk_full_3 = msk_full.expand_as(img_tensor)    # [3,H,W]
-        bg_mask_3 = 1.0 - msk_full_3                   # [3,H,W]
+        msk_full = msk_full.to(img_tensor.device)           # [1,H,W]
+        msk_full_3 = msk_full.expand_as(img_tensor)         # [3,H,W]
+        bg_mask_3  = 1.0 - msk_full_3                       # [3,H,W]
 
-        # Blend ONLY in the background:
-        #   - inside polyp: keep original image
-        #   - outside polyp: alpha-blend original and diffused
-        bg_blended = self.alpha * img_tensor + (1.0 - self.alpha) * diff_aug_img
-        infused_img = msk_full_3 * img_tensor + bg_mask_3 * bg_blended
+        # 1) Compute low-frequency components of real and SD images
+        img_low = gaussian_blur_tensor(img_tensor)          # [3,H,W]
+        sd_low  = gaussian_blur_tensor(diff_aug_img)        # [3,H,W]
+
+        # 2) Mix low-frequency components (global alpha)
+        low_blended = self.alpha * img_low + (1.0 - self.alpha) * sd_low
+
+        # 3) Reconstruct "styled" image:
+        #    keep high-frequency detail from the real image,
+        #    inject only low-frequency style from SD
+        styled = img_tensor + (low_blended - img_low)
+
+        # 4) Apply only in the background:
+        #    - inside polyp: original image
+        #    - outside polyp: styled image
+        infused_img = msk_full_3 * img_tensor + bg_mask_3 * styled
 
         return infused_img.clamp(0, 1)
+
 
