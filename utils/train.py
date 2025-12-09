@@ -183,42 +183,40 @@ def training_loop(dataloader,
                   scheduler,
                   criterion,
                   device,
-                  threshold, 
+                  threshold,          # kept for API compatibility, not used for stopping
                   ma_window,
                   max_epochs, 
-                  min_epochs, 
+                  min_epochs,         # kept for API compatibility, not used for stopping
                   best_model_save_path, 
                   logger,
                   use_scheduler=False, 
                   save_model=True,
-                  val_dataloader=None,         # <-- NEW: optional validation loader
-                  val_num_repeat=1):           # <-- NEW: how many times to average val
+                  val_dataloader=None,
+                  val_num_repeat=1):
+
     model.to(device)
     model.train()
 
-    # train metrics (same as before)
+    # train metrics
     epoch_loss_list = []
     ma_loss_list = []
     epoch_dice_score_list = []
     epoch_miou_score_list = []
 
-    # validation metrics (only used internally for convergence / best model)
+    # val metrics (for monitoring only)
     val_loss_list = []
+    val_dice_list = []
+    val_iou_list  = []
 
-    min_loss = float('inf')   # best loss (train or val, depending on what's used)
-    best_model, best_optimizer = None, None
-    best_model_epoch = 0
-    min_loss_dice_score, min_loss_miou_score = 0.0, 0.0
+    logger.info(f"Choosen train subset has: {train_data_size} data")
+    logger.info("Training started...")
 
     epoch = 0
-    
-    logger.info(f"Choosen train subset has: {train_data_size} data")
-    logger.info(f"Training started...")
-    while True:
+    while epoch < max_epochs:       # <-- fixed-length training, no early stop
         epoch += 1
         model.train()
 
-        ## curriculum epoch set
+        # curriculum epoch set (for diffusion)
         if hasattr(dataloader.dataset, "diff_aug") and dataloader.dataset.diff_aug is not None:
             dataloader.dataset.diff_aug.set_epoch(epoch)
 
@@ -231,12 +229,12 @@ def training_loop(dataloader,
             criterion=criterion, 
             device=device
         )
-        
+
         epoch_loss_list.append(mean_epoch_loss)
         epoch_dice_score_list.append(mean_epoch_dice_score)
         epoch_miou_score_list.append(mean_epoch_miou_score)
 
-        # -------- VALIDATION via test_loop (if provided) --------
+        # -------- VALIDATION (monitoring only) --------
         if val_dataloader is not None:
             val_loss, val_dice, val_iou = test_loop(
                 model=model,
@@ -247,74 +245,60 @@ def training_loop(dataloader,
                 num_repeat=val_num_repeat,
             )
             val_loss_list.append(val_loss)
-
-            # For convergence & best model, use VALIDATION loss
-            loss_for_early_stop = val_loss
-            history_for_ma = val_loss_list
+            val_dice_list.append(val_dice)
+            val_iou_list.append(val_iou)
 
             logger.info(
                 f"Epoch [{epoch:04}] "
                 f"Train - Loss: {mean_epoch_loss:.4f}, Dice: {mean_epoch_dice_score:.4f}, mIoU: {mean_epoch_miou_score:.4f} | "
                 f"Val - Loss: {val_loss:.4f}, Dice: {val_dice:.4f}, mIoU: {val_iou:.4f}"
             )
+
+            # moving average on val loss (for plotting/analysis only)
+            history_for_ma = val_loss_list
         else:
-            # No validation loader: keep original behaviour (train-only)
-            loss_for_early_stop = mean_epoch_loss
+            logger.info(
+                f"Epoch [{epoch:04}], "
+                f"Loss: {mean_epoch_loss:.4f}, Dice: {mean_epoch_dice_score:.4f}, mIoU: {mean_epoch_miou_score:.4f}"
+            )
             history_for_ma = epoch_loss_list
 
-            logger.info(
-                f"Epoch [{epoch:04}], Loss: {mean_epoch_loss:.4f}, "
-                f"Dice Score: {mean_epoch_dice_score:.4f}, mIoU Score: {mean_epoch_miou_score:.4f}"
-            )
-
-        # -------- Moving-average loss (on whichever loss we're using) --------
+        # moving-average loss (no longer used for stopping)
         ma_loss = np.mean(history_for_ma[-ma_window:])
         ma_loss_list.append(ma_loss)
 
-        # -------- Track best model based on loss_for_early_stop --------
-        if loss_for_early_stop < min_loss:
-            min_loss = loss_for_early_stop
-            best_model_epoch = epoch
-
-            if val_dataloader is not None:
-                min_loss_dice_score = val_dice
-                min_loss_miou_score = val_iou
-            else:
-                min_loss_dice_score = mean_epoch_dice_score
-                min_loss_miou_score = mean_epoch_miou_score
-
-            best_model = copy.deepcopy(model)
-            best_optimizer = copy.deepcopy(optimizer)
-
-        # -------- Check convergence / early stopping --------
-        stopping = check_stopping_conditions(
-            epoch_loss_list=history_for_ma,
-            current_loss=loss_for_early_stop,
-            current_ma_loss=ma_loss,
-            ma_window=ma_window, 
-            threshold=threshold, 
-            min_epochs=min_epochs
-        )
-        
-        if stopping:
-            logger.warning("Metrics converged and loss stabilized. Training stopped!")
-            break
-        if epoch >= max_epochs:
-            logger.warning("Reached maximum number of epochs. Training stopped")
-            break
-         
         if use_scheduler:
             scheduler.step()
-    
+
+    logger.warning("Reached maximum number of epochs. Training stopped")
+
+    # -------- Use LAST EPOCH model as 'best' --------
+    best_model = model
+    best_optimizer = optimizer
+    best_model_epoch = epoch
+
+    # For logging, use last seen val metrics if available, else last train metrics
+    if val_dataloader is not None and len(val_loss_list) > 0:
+        final_loss = val_loss_list[-1]
+        final_dice = val_dice_list[-1]
+        final_miou = val_iou_list[-1]
+        source_str = "Val"
+    else:
+        final_loss = epoch_loss_list[-1]
+        final_dice = epoch_dice_score_list[-1]
+        final_miou = epoch_miou_score_list[-1]
+        source_str = "Train"
+
     if save_model and best_model is not None:
         torch.save({
             'model_state_dict': best_model.state_dict(),
             'optimizer_state_dict': best_optimizer.state_dict()
         }, f'{best_model_save_path}.traindata_{train_data_size}.pt')
+
         logger.info(
-            f"Best model found at Epoch: {best_model_epoch:04}. "
-            f"Loss: {min_loss:.4f}, Dice score: {min_loss_dice_score:.4f}, "
-            f"mIoU score: {min_loss_miou_score:.4f}"
+            f"Final model (Epoch: {best_model_epoch:04}) saved based on fixed {max_epochs} epochs. "
+            f"{source_str} Loss: {final_loss:.4f}, Dice: {final_dice:.4f}, mIoU: {final_miou:.4f}"
         )
-    
+
     return best_model, epoch_loss_list, ma_loss_list, epoch_dice_score_list, epoch_miou_score_list
+

@@ -88,6 +88,8 @@ def main():
     #   - or "test_data"/"test_ood1"/"test_ood2"
     train_data = data["train_data"]
     val_data = data["val_data"]
+    train_data = data["train_data"] + data["val_data"]
+
     test_data_id = data["test_data_id"]
     test_data_ood1 = data["test_data_ood1"]
     test_data_ood2 = data["test_data_ood2"]
@@ -140,14 +142,14 @@ def main():
         diff_aug=diff_aug,
     )
 
-    valid_ds = DiffusedDataset(
-        data=val_data,
-        mode="val",
-        aug_mode=aug_mode,
-        image_size=image_size,
-        mask_size=mask_size,
-        diff_aug=None,
-    )
+    # valid_ds = DiffusedDataset(
+    #     data=val_data,
+    #     mode="val",
+    #     aug_mode=aug_mode,
+    #     image_size=image_size,
+    #     mask_size=mask_size,
+    #     diff_aug=None,
+    # )
 
     test_ds_id = DiffusedDataset(
         data=test_data_id,
@@ -183,13 +185,13 @@ def main():
         num_workers=0,
         pin_memory=True,
     )
-    valid_loader = DataLoader(
-        valid_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=True,
-    )
+    # valid_loader = DataLoader(
+    #     valid_ds,
+    #     batch_size=batch_size,
+    #     shuffle=False,
+    #     num_workers=0,
+    #     pin_memory=True,
+    # )
     test_loader_id = DataLoader(
         test_ds_id,
         batch_size=batch_size,
@@ -252,7 +254,7 @@ def main():
         logger=logger,
         use_scheduler=use_scheduler,
         save_model=save_model,
-        val_dataloader=valid_loader
+        val_dataloader=None
     )
 
     paths = save_training_curves(
